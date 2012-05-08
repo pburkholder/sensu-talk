@@ -35,26 +35,11 @@ Trend data to predict and diagnose
 
 Key characteristics of monitoring
 
-- Integrate with Cloud Operations: CL
--- Instances should be automatically monitored
--- Cleanly decommissioned instances should go away
-- Integrate with Configuration Management (Puppet or Chef): CM
--- Adding and removing checks should be facilitated by Puppet
-- Provide 'sensible' alerting: AL
--- Partition urgency of alert by environment and/or time
-- Support Developer Integration: DV
--- Can we code our apps to monitor themselves, or provide metrics
-- Trending: TR
--- Gather data, present them and share them
-- Comprehensive Checks: CH
--- Make it easy to monitor _anything_
--- If possible, implement _service dependencies_
-- Available and Secure: AS
--- Also, we need to label our instances sensibly...
 
 Audax only: Replace RightScale: RS
 
-
+Talk
+====
 
 
 Good Evening
@@ -186,8 +171,102 @@ That was about as far as I got before I realized I needed to take my hands off
 the keyboard and step back.
 
 TKTKTK How sensu and I found each other.  
+Fortunately, there'd been some buzz on Twitter about Sensu, and over the
+course of a weekend I became convinced that I needed to abandon Nagios, or any
+other monolithic monitoring system, and try Sensu.
 
+Sensu started as an internal project at Sonian, an archive-as-a-service
+provider which runs on AWS.  Sean Porter and others had been using Nagios w/
+Chef, but ran into many of the same convergence issues that I had described,
+but also ran into scaling issues with Nagios's active check architecture.  So
+Sean and a teammate, TKTK, wrote Sensu for internal use, and open-sourced it
+in November of 2011.  Since then, it's seen a lot of uptake and has a very
+active community.  Lots of help is available on IRC if you bother to stop in.
 
+Backbone is the RabbitMQ message broker. 
+
+Then we need at least one sensu-server, and typically on that box we'll run
+Redis to provide persistence.  Sensu-server is written in Ruby, and can be
+installed as a Gem, as an RPM, and soon as .deb.
+
+All of the configuration is in JSON.  Here's a minimal configuration for a
+sensu-server:
+
+{
+  "rabbitmq": {
+    "host": "<%= rabbitmq_host %>",
+    "port": <%= rabbitmq_port %>
+  },
+  "redis": {
+    "host": "<%= redis_host %>",
+    "port": <%= redis_port %>
+  },
+  "api": {
+    "host": "<%= api_host %>",
+    "port": <%= api_port %>
+  },
+}
+
+What's missing from this is the definition of what checks to run.  Rather than
+define the checks in a single massive JSON file, we can drop JSON snippets
+into /etc/sensu/conf.d, like this:
+
+{
+  "checks": {
+    "system_disks": {
+      "handlers": ["irc", "mailer", "default" ],
+      "notification": "System disk space is being exhausted",
+      "command": "/etc/sensu/plugins/community/check-disk.rb -w 80 -c 90 -x tmpfs",
+      "subscribers": [ "generic" ],
+      "occurrences": 2,
+      "interval": 300
+    }
+  }
+}
+
+OR
+
+{
+  "checks": {
+    "careverge_api": {
+      "handlers": ["irc", "default", "mailer" ],
+      "notification": "Careverge API is not responding appropriately",
+      "command": "/etc/sensu/plugins/local/check_cvapi.sh -S",
+      "subscribers": [ "cvapi" ],
+      "interval": 30,
+      "refresh": 600
+    }
+  }
+}
+
+On the client side, we need only install sensu-client, and configure it.  The
+configuration is pretty minimal: Specify the rabbitmq information and details
+on this client:
+
+{
+  "rabbitmq": {
+    "host": "<%= rabbitmq_host %>",
+    "port": <%= rabbitmq_port %>
+  },
+  "client": {
+    "name": "<%= sensu_hostname %>",
+    "address": "<%= ipaddress %>",
+    "subscriptions": [ "generic", "cvapi" ]
+  }
+}
+
+All of the check details can go in conf.d/ again, and from a configuration
+mgmt standpoint we have the added bonus that we can use the _exact same_
+conf.d/ as we had on the server.  Now we can leverage the beauty of the
+message queue 
+
+* Sensu-server publishes a 'check-disk' request to the 'generic' channel every
+  300s.
+* Sensu-client how subscribe to 'generic' run the check and publish the
+  results
+* Sensu-server processes the results, and passes any failures to the handlers
+* Likewise for the 30s interval checks of the API, but then it's only for the
+  nodes subscribed to 'cvapi'.
 
 
 Sensu works so well that I had to make sure that the check scripts were
@@ -195,3 +274,118 @@ installed before the sensu service. Not because there's any logical
 dependency, but simply , otherwise the client would come up and
 start acting on published requests for, say, 'check\_disks' and fail because
 the 'check\_disk.rb' script wasn't there yet.
+
+Handlers
+--------
+
+In order for anything useful to happen with a failed check result, we need
+handlers to, say, notify us or even take action.  Let's take a look at IRC,
+for example:
+
+  irc.json
+
+  irc.rb
+
+That's about it.
+
+
+API
+---
+
+Thin/Sinatra service running on port 4567
+
+* Read and update key/values in Redis
+* Publish check requests on RabbitMQ
+
+For example:
+
+
+KeepAlives
+----------
+
+Remember how we had issues with handling terminated nodes in Nagios?  In
+Sensu, the clients will send keep-alives every 30s so if a sensu-client
+service dies unexpectedly, or the node hosting it, we can know about it.
+
+Upon an orderly system shutdown we can have a de-register itself through the
+Sensu API.  Since we're currently on RightScale I've added this little script
+to the Termination sequence on RightScale:
+
+
+  #!/usr/bin/ruby
+
+  config_file='/etc/sensu/client.json'
+  json = File.read(config_file)
+
+  client_name = JSON.parse(json)['client']['name']
+  api_host    = JSON.parse(json)['api']['host']
+
+  uri   = URI.parse("http://#{api_host}/client/#{client_name}")
+
+  http  = Net::HTTP.new(uri.host, uri.port)
+  http.request( Net::HTTP::Delete.new(uri.path) )
+
+
+Dashboard
+=========
+
+One place where Sensu really shows its youth is in the interactive WebUI
+
+(Three screenshots)
+
+It is not yet PHB-compliant.
+
+CheckPoint
+==========
+
+* RabbitMQ
+* Redis 
+* sensu-server: 
+** Publishes check requests
+** Pushes results to Handler
+* sensu-client:
+** Listens for check-requests on its subscriptions
+** Runs check commands and publishes to MQ
+* sensu-api
+* sensu-dashboard
+
+More Features
+=============
+
+But wait, there's more:
+
+* Application integration
+* Sensu and Graphite
+* Standalone Checks
+* Puppet integration
+* Scheduling downtime
+* Parameter passing
+* Ideal monitoring system
+
+Missing Features
+================
+
+* Reporting dashboard
+* Service dependencies
+
+
+Monitoring Requirements
+-----------------------
+
+
+- Integrate with Cloud Operations: CL
+-- Instances should be automatically monitored
+-- Cleanly decommissioned instances should go away
+- Integrate with Configuration Management (Puppet or Chef): CM
+-- Adding and removing checks should be facilitated by Puppet
+- Provide 'sensible' alerting: AL
+-- Partition urgency of alert by environment and/or time
+- Support Developer Integration: DV
+-- Can we code our apps to monitor themselves, or provide metrics
+- Trending: TR
+-- Gather data, present them and share them
+- Comprehensive Checks: CH
+-- Make it easy to monitor _anything_
+-- If possible, implement _service dependencies_
+- Available and Secure: AS
+-- Also, we need to label our instances sensibly...
