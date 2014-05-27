@@ -70,9 +70,9 @@ Each Sensu client has a list of subscriptions, starting with _common_. In additi
 
 --
 
-`check_procs -h`
-`check_tcp -h`
-`check_http -h`
+- `check_procs -h`
+- `check_tcp -h`
+- `check_http -h`
 
 Tip: check your own API for health/status
 
@@ -86,7 +86,7 @@ With Sensu tokenization:
 
 --
 
-    /etc/sensu/conf.d/client.json
+/etc/sensu/conf.d/client.json:
 
     {
       "client": {
@@ -101,7 +101,7 @@ With Sensu tokenization:
 
 --
 
-    /etc/sensu/runners/api
+/etc/sensu/runners/api:
 
     checks:
       check_rabbitmq-analytics_client:
